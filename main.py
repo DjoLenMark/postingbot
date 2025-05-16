@@ -48,7 +48,10 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, handle_media))
 
     logging.info("🤖 Telegram-бот запущен через polling")
-    await application.run_polling()
+
+    await application.initialize()
+    await application.start()
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
