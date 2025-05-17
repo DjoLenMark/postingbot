@@ -107,13 +107,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "confirm_platforms":
         post = user_post_data.get(uid, {})
-        result = "🎉 Пост сохранён!
+        result = "🎉 Пост сохранён!\n" + "Выбраны платформы: " + ", ".join(selected_platforms)
 
-"
-        result += f"📄 Текст: {post.get('text', '')}
-"
-        result += f"📆 Дата: {post.get('date', 'Сейчас')}
-"
+
+        result += f"📄 Текст: {post.get('text', '')}"
+        result += f"📆 Дата: {post.get('date', 'Сейчас')}"
         result += f"📲 Платформы: {', '.join(post.get('platforms', []))}"
         await query.edit_message_text(result)
         await context.bot.send_message(chat_id=uid, text="🔁 Новый пост", reply_markup=InlineKeyboardMarkup([[
