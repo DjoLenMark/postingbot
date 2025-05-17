@@ -53,7 +53,11 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        import nest_asyncio
+        nest_asyncio.apply()
+
         loop = asyncio.get_event_loop()
-        loop.run_until_complete(main())
+        loop.create_task(main())
+        loop.run_forever()
     except Exception as e:
         logging.error(f"❌ Ошибка запуска: {e}")
