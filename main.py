@@ -2,111 +2,129 @@ import os
 import logging
 import asyncio
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    MessageHandler,
-    CommandHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
-    filters,
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
 )
+from telegram.ext import (
+    ApplicationBuilder, ContextTypes, CallbackQueryHandler,
+    MessageHandler, CommandHandler, filters
+)
+from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO)
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Этапы сценария
-STEP_CONTENT, STEP_DATE, STEP_PLATFORM = range(3)
+# Хранилище данных поста
+user_post_data = {}
 
-user_data = {}
-
-# === Handlers ===
-
+# ==== ШАГ 1: ПОЛУЧЕНИЕ МЕДИА ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data[update.effective_chat.id] = {"media": {}}
-    await update.message.reply_text("📥 Отправь текст, фото и/или видео поста:")
-    return STEP_CONTENT
+    user_post_data[update.effective_user.id] = {"step": 1}
+    await update.message.reply_text("📥 Отправьте текст, фото и/или видео для будущего поста")
 
-async def receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_chat.id
-    message = update.message
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    state = user_post_data.get(uid, {})
+    if state.get("step") != 1:
+        return
 
-    text = message.caption or message.text or ""
-    photo = message.photo[-1].file_id if message.photo else None
-    video = message.video.file_id if message.video else None
+    text = update.message.caption or update.message.text or ""
+    photo = update.message.photo[-1].file_id if update.message.photo else None
+    video = update.message.video.file_id if update.message.video else None
 
-    user_data[uid]["media"] = {"text": text, "photo": photo, "video": video}
+    user_post_data[uid].update({"text": text, "photo": photo, "video": video, "step": 2})
+    await send_calendar(update, context)
 
-    await update.message.reply_text("📅 Теперь выбери дату и время публикации (в формате ГГГГ-ММ-ДД ЧЧ:ММ):")
-    return STEP_DATE
+# ==== ШАГ 2: КАЛЕНДАРЬ ====
+async def send_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
+    keyboard = []
+    week_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    keyboard.append([InlineKeyboardButton(day, callback_data="ignore") for day in week_days])
 
-async def receive_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_chat.id
-    user_data[uid]["datetime"] = update.message.text.strip()
+    for i in range(0, 42):
+        day = now + timedelta(days=i)
+        button = InlineKeyboardButton(str(day.day), callback_data=f"date:{day.strftime('%d.%m.%Y')}")
+        if i % 7 == 0:
+            keyboard.append([])
+        keyboard[-1].append(button)
 
-    keyboard = [
-        [InlineKeyboardButton("Telegram ✅", callback_data="tg"),
-         InlineKeyboardButton("VK", callback_data="vk")],
-        [InlineKeyboardButton("Tilda", callback_data="tilda")],
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm")]
-    ]
+    keyboard.append([
+        InlineKeyboardButton("📅 Ввести вручную", callback_data="manual_date"),
+        InlineKeyboardButton("🚀 Опубликовать сейчас", callback_data="now")
+    ])
 
-    await update.message.reply_text("🌐 Выбери платформы для публикации:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return STEP_PLATFORM
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="🗓 Выберите дату публикации:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-async def platform_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==== ШАГ 3: ВЫБОР ПЛАТФОРМ ====
+PLATFORMS = ["Telegram", "VK", "Instagram", "YouTube", "Tilda"]
+
+async def ask_platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user_post_data[uid]["step"] = 3
+    selected = user_post_data[uid].get("platforms", [])
+
+    buttons = []
+    for platform in PLATFORMS:
+        selected_marker = "✅" if platform in selected else "➕"
+        buttons.append(
+            InlineKeyboardButton(f"{selected_marker} {platform}", callback_data=f"platform:{platform}")
+        )
+
+    buttons.append(InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_platforms"))
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="📲 Выберите платформы для публикации:",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+# ==== ОБРАБОТЧИКИ ====
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    uid = query.from_user.id
     await query.answer()
-    uid = query.message.chat.id
 
-    if query.data == "confirm":
-        media = user_data[uid]["media"]
-        dt = user_data[uid]["datetime"]
-        platforms = user_data[uid].get("platforms", ["Telegram ✅"])
+    if query.data.startswith("date:"):
+        user_post_data[uid]["date"] = query.data.split(":")[1]
+        await query.edit_message_text(f"🗓 Дата выбрана: {user_post_data[uid]['date']}")
+        await ask_platforms(update, context)
 
-        result = f"🎉 Пост сохранён!
+    elif query.data.startswith("platform:"):
+        platform = query.data.split(":")[1]
+        selected = user_post_data[uid].get("platforms", [])
+        if platform in selected:
+            selected.remove(platform)
+        else:
+            selected.append(platform)
+        user_post_data[uid]["platforms"] = selected
+        await ask_platforms(update, context)
 
-📝 Текст: {media['text']}
-📅 Дата: {dt}
-📡 Платформы: {', '.join(platforms)}"
+    elif query.data == "confirm_platforms":
+        post = user_post_data.get(uid, {})
+        result = "🎉 Пост сохранён!
+
+"
+        result += f"📄 Текст: {post.get('text', '')}
+"
+        result += f"📆 Дата: {post.get('date', 'Сейчас')}
+"
+        result += f"📲 Платформы: {', '.join(post.get('platforms', []))}"
         await query.edit_message_text(result)
+        await context.bot.send_message(chat_id=uid, text="🔁 Новый пост", reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("Создать новый пост", callback_data="new_post")
+        ]]))
 
-        keyboard = [[InlineKeyboardButton("➕ Новый пост", callback_data="newpost")]]
-        await query.message.reply_text("Готово ✅", reply_markup=InlineKeyboardMarkup(keyboard))
-        return ConversationHandler.END
+    elif query.data == "new_post":
+        user_post_data[uid] = {"step": 1}
+        await context.bot.send_message(chat_id=uid, text="📥 Отправьте текст, фото и/или видео для нового поста")
 
-    # Добавление/удаление платформ
-    platforms = user_data[uid].get("platforms", [])
-    if query.data in platforms:
-        platforms.remove(query.data)
-    else:
-        platforms.append(query.data)
-    user_data[uid]["platforms"] = platforms
-
-    # Обновить клавиатуру
-    def btn(label): return f"{label}{' ✅' if label in platforms else ''}"
-    keyboard = [
-        [InlineKeyboardButton(btn("Telegram"), callback_data="tg"),
-         InlineKeyboardButton(btn("VK"), callback_data="vk")],
-        [InlineKeyboardButton(btn("Tilda"), callback_data="tilda")],
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm")]
-    ]
-    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
-    return STEP_PLATFORM
-
-async def new_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    return await start(query, context)
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚫 Отменено.")
-    return ConversationHandler.END
-
-# === Ping server ===
-
+# ==== PING-SERVER ====
 async def handle_ping(request):
     return web.Response(text="pong")
 
@@ -119,31 +137,18 @@ async def start_ping_server():
     await site.start()
     logging.info("🚀 AIOHTTP ping-сервер запущен на порту 8080")
 
-# === Main ===
-
+# ==== MAIN ====
 async def main():
     await start_ping_server()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            STEP_CONTENT: [MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, receive_content)],
-            STEP_DATE: [MessageHandler(filters.TEXT, receive_date)],
-            STEP_PLATFORM: [CallbackQueryHandler(platform_select)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    app.add_handler(conv_handler)
-    app.add_handler(CallbackQueryHandler(new_post_callback, pattern="^newpost$"))
-
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, handle_media))
+    app.add_handler(CallbackQueryHandler(button_handler))
     logging.info("🤖 Telegram-бот запущен через polling")
-    await app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logging.error(f"❌ Ошибка запуска: {e}")
+    asyncio.run(main())
