@@ -113,11 +113,9 @@ async def main():
     logging.info("🤖 Бот запущен")
     await app.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    import nest_asyncio
+    nest_asyncio.apply()
+
     import asyncio
-    try:
-        asyncio.run(main())
-    except RuntimeError:
-        import nest_asyncio
-        nest_asyncio.apply()
-        asyncio.run(main())
+    asyncio.get_event_loop().run_until_complete(main())
