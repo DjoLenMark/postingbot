@@ -1,85 +1,121 @@
 import os
 import logging
-import asyncio
-from aiohttp import web
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (ApplicationBuilder, ContextTypes, CallbackQueryHandler,
+                          CommandHandler, MessageHandler, filters)
 
 logging.basicConfig(level=logging.INFO)
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# === Хранилище сессий пользователей ===
-user_sessions = {}
+# Временное хранилище состояния пользователей
+user_state = {}
 
-# === Telegram Handlers ===
-
+# === START ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_state[update.effective_user.id] = {}
+    await update.message.reply_text("📥 Отправь текст, фото или видео для поста")
+
+# === Получение текста/фото/видео ===
+async def collect_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_sessions[user_id] = {"step": 1, "media": {}, "text": ""}
-    await update.message.reply_text("👋 Привет! Отправь текст, фото или видео, чтобы создать пост.")
+    data = user_state.setdefault(user_id, {})
+    
+    if update.message.text:
+        data['text'] = update.message.text
+    if update.message.photo:
+        data['photo'] = update.message.photo[-1].file_id
+    if update.message.video:
+        data['video'] = update.message.video.file_id
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_calendar(update, context)
+
+# === Календарь ===
+def generate_calendar_keyboard():
+    today = datetime.now()
+    keyboard = []
+    weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    keyboard.append([InlineKeyboardButton(day, callback_data="IGNORE") for day in weekdays])
+
+    first_day = today.replace(day=1)
+    next_month = (first_day.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days_range = (next_month - first_day).days
+    
+    row = []
+    skip = (first_day.weekday() + 1) % 7
+    for _ in range(skip):
+        row.append(InlineKeyboardButton(" ", callback_data="IGNORE"))
+    
+    for day in range(1, days_range + 1):
+        current = first_day.replace(day=day)
+        row.append(InlineKeyboardButton(str(day), callback_data=f"DATE_{current.strftime('%d.%m.%Y')}"))
+        if len(row) == 7:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("📅 Опубликовать сейчас", callback_data="NOW"),
+        InlineKeyboardButton("✏️ Ввести вручную", callback_data="MANUAL")
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🗓 Выбери дату публикации:", reply_markup=generate_calendar_keyboard())
+
+# === Обработка нажатий кнопок ===
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
     user_id = update.effective_user.id
-    session = user_sessions.get(user_id, {"step": 1, "media": {}, "text": ""})
 
-    message = update.message
-    text = message.caption or message.text or ""
-    photo = message.photo[-1].file_id if message.photo else None
-    video = message.video.file_id if message.video else None
+    if data.startswith("DATE_"):
+        user_state[user_id]['date'] = data.replace("DATE_", "")
+        await query.edit_message_text(text=f"✅ Дата выбрана: {user_state[user_id]['date']}\nТеперь выбери время:",
+                                      reply_markup=generate_time_keyboard())
+    elif data.startswith("TIME_"):
+        time = data.replace("TIME_", "")
+        user_state[user_id]['time'] = time
+        await query.edit_message_text(text=f"✅ Время выбрано: {time}\nПост готов к публикации. (Платформы будут следующими)")
+    elif data == "NOW":
+        user_state[user_id]['now'] = True
+        await query.edit_message_text(text="✅ Пост будет опубликован сейчас. (Платформы будут следующими)")
+    elif data == "MANUAL":
+        await query.edit_message_text("Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ")
 
-    # Сохраняем полученные данные
-    if text:
-        session["text"] = text
-    if photo:
-        session["media"]["photo"] = photo
-    if video:
-        session["media"]["video"] = video
+# === Выбор времени ===
+def generate_time_keyboard():
+    hours = [f"{i:02d}" for i in range(0, 24)]
+    minutes = [f"{i:02d}" for i in range(0, 60, 5)]
+    keyboard = []
 
-    session["step"] = 2
-    user_sessions[user_id] = session
+    hour_row = [InlineKeyboardButton(h, callback_data=f"TIME_{h}:00") for h in hours]
+    minute_row = [InlineKeyboardButton(m, callback_data=f"TIME_00:{m}") for m in minutes]
 
-    await update.message.reply_text(
-    "🗓 Теперь выбери дату и время публикации.\n\n"
-    "📅 Календарь, кнопка 'Опубликовать сейчас' и поле ручного ввода скоро будут добавлены."
-)
+    for i in range(0, 24, 6):
+        keyboard.append([InlineKeyboardButton(hours[j], callback_data=f"TIME_{hours[j]}:00") for j in range(i, i+6)])
+    keyboard.append([InlineKeyboardButton(m, callback_data=f"TIME_00:{m}") for m in minutes[:6]])
+    keyboard.append([InlineKeyboardButton(m, callback_data=f"TIME_00:{m}") for m in minutes[6:12]])
 
-# === AIOHTTP ping-сервер для Render ===
+    return InlineKeyboardMarkup(keyboard)
 
-async def handle_ping(request):
-    return web.Response(text="pong")
-
-async def start_ping_server():
-    app = web.Application()
-    app.add_routes([web.get("/", handle_ping), web.get("/ping", handle_ping)])
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
-    await site.start()
-    logging.info("🚀 AIOHTTP ping-сервер запущен на порту 8080")
-
-# === Main ===
-
+# === MAIN ===
 async def main():
-    await start_ping_server()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, collect_post))
+    app.add_handler(CallbackQueryHandler(handle_callback))
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, handle_media))
+    logging.info("🤖 Бот запущен")
+    await app.run_polling()
 
-    logging.info("🤖 Telegram-бот запущен через polling")
-    await application.run_polling()
-
-if __name__ == "__main__":
+if __name__ == '__main__':
+    import asyncio
     try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(main())
-        loop.run_forever()
-    except Exception as e:
-        logging.error("❌ Ошибка запуска: " + str(e))
+        asyncio.run(main())
+    except RuntimeError:
+        import nest_asyncio
+        nest_asyncio.apply()
+        asyncio.run(main())
