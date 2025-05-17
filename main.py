@@ -1,5 +1,7 @@
 import os
 import logging
+import nest_asyncio
+nest_asyncio.apply()
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (ApplicationBuilder, ContextTypes, CallbackQueryHandler,
